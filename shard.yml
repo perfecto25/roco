@@ -1,0 +1,14 @@
+name: roco
+version: 0.1.0
+description: Network proxy daemon for routing packets through relays
+
+authors:
+  - Mike Reider <mike.reider@gmail.com>
+
+targets:
+  roco:
+    main: src/roco.cr
+
+dependencies:
+  yaml:
+    github: crystal-lang/crystal

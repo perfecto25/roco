@@ -1,0 +1,9 @@
+port: 12190
+
+relays:
+  serverB:
+    targets: ["serverC", "208.224.251.1", "192.168.30.0/24"]
+    port: 12255
+
+  serverD:
+    targets: ["serverE"]

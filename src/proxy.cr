@@ -1,10 +1,11 @@
 require "socket"
 require "./socket_utils"
 require "./config"
+require "./logger"
 
 class TCPProxy
-  HANDSHAKE_PREFIX = "ROCO1 "
-  HANDSHAKE_MAX    = 256
+  HANDSHAKE_PREFIX = "ROCO2 "
+  HANDSHAKE_MAX    = 4096
   BUFFER_SIZE      = 4096
 
   def initialize(@config : Config)
@@ -13,44 +14,61 @@ class TCPProxy
   def handle_client(client : TCPSocket) : Void
     server = nil.as(TCPSocket?)
     begin
-      dest_ip, dest_port = determine_destination(client)
-
-      unless dest_ip && dest_port
-        puts "[proxy] Could not determine destination — dropping connection"
+      chain = determine_chain(client)
+      unless chain && !chain.empty?
+        Logger.warn("proxy", "Could not determine destination — dropping connection")
         return
       end
 
-      next_hop = @config.find_next_hop(dest_ip)
-      if next_hop
-        relay_addr = next_hop.resolve_address
-        relay_port = next_hop.port
-        puts "[proxy] #{dest_ip}:#{dest_port} via relay '#{next_hop.name}' (#{relay_addr}:#{relay_port})"
-        server = TCPSocket.new(relay_addr, relay_port)
-        write_handshake(server, dest_ip, dest_port)
+      next_hop = chain.first
+      remaining = chain[1..]
+
+      addr = next_hop.resolve_address
+      if remaining.empty?
+        Logger.debug("proxy", "Direct to #{next_hop.host}:#{next_hop.port}")
       else
-        puts "[proxy] Direct to #{dest_ip}:#{dest_port}"
-        server = TCPSocket.new(dest_ip, dest_port)
+        Logger.debug("proxy", "Hop to #{next_hop.host}:#{next_hop.port}, then #{remaining.map(&.to_handshake).join(" -> ")}")
       end
+
+      server = TCPSocket.new(addr, next_hop.port)
+      write_handshake(server, remaining) unless remaining.empty?
 
       proxy_bidirectional(client, server)
     rescue e
-      puts "[proxy] Error: #{e.message}"
+      Logger.error("proxy", "#{e.message}")
     ensure
       client.close rescue nil
       server.try &.close rescue nil
     end
   end
 
-  private def determine_destination(client : TCPSocket) : {String?, UInt16?}
-    # Locally REDIRECTed connection — kernel knows the original dest.
+  private def determine_chain(client : TCPSocket) : Array(Hop)?
+    # Locally REDIRECTed: kernel knows the original destination.
     ip, port = SocketUtils.get_original_destination(client)
-    return {ip, port} if ip && port
+    if ip && port
+      return build_chain_from_config(ip, port)
+    end
 
-    # Otherwise the peer is a roco node that prefixed a handshake.
+    # Peer roco connection: read handshake.
     read_handshake(client)
   end
 
-  private def read_handshake(client : TCPSocket) : {String?, UInt16?}
+  private def build_chain_from_config(dest_ip : String, dest_port : UInt16) : Array(Hop)
+    route = @config.find_route(dest_ip)
+    if route
+      relay, matched_target = route
+      host = (relay.resolve_dns && hostname_like?(matched_target)) ? matched_target : dest_ip
+      relay.chain + [Hop.new(host, dest_port)]
+    else
+      [Hop.new(dest_ip, dest_port)]
+    end
+  end
+
+  private def hostname_like?(s : String) : Bool
+    !s.includes?("/") && !/\A(\d{1,3}\.){3}\d{1,3}\z/.matches?(s)
+  end
+
+  private def read_handshake(client : TCPSocket) : Array(Hop)?
     client.read_timeout = 5.seconds
     begin
       line = String.build do |io|
@@ -61,19 +79,30 @@ class TCPProxy
         end
       end
 
-      return {nil, nil} unless line.starts_with?(HANDSHAKE_PREFIX)
-      parts = line[HANDSHAKE_PREFIX.size..].split(' ')
-      return {nil, nil} unless parts.size == 2
-      {parts[0], parts[1].to_u16}
+      return nil unless line.starts_with?(HANDSHAKE_PREFIX)
+      payload = line[HANDSHAKE_PREFIX.size..]
+      hops = payload.split(' ').reject(&.empty?).map do |s|
+        Hop.parse(s, @config.port)
+      end
+      return nil if hops.empty?
+      hops
     ensure
       client.read_timeout = nil
     end
   rescue
-    {nil, nil}
+    nil
   end
 
-  private def write_handshake(server : TCPSocket, dest_ip : String, dest_port : UInt16) : Void
-    server.print "#{HANDSHAKE_PREFIX}#{dest_ip} #{dest_port}\n"
+  private def write_handshake(server : TCPSocket, hops : Array(Hop)) : Void
+    line = String.build do |io|
+      io << HANDSHAKE_PREFIX
+      hops.each_with_index do |h, i|
+        io << " " if i > 0
+        io << h.to_handshake
+      end
+      io << "\n"
+    end
+    server.print line
     server.flush
   end
 
@@ -111,7 +140,7 @@ class RelayServer
   end
 
   def start : Void
-    puts "[relay] Listening on 0.0.0.0:#{@config.port}"
+    Logger.info("relay", "Listening on 0.0.0.0:#{@config.port}")
 
     loop do
       begin

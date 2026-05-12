@@ -1,4 +1,5 @@
 require "socket"
+require "./logger"
 
 class Netfilter
   CHAIN_NAME = "ROCO"
@@ -38,7 +39,7 @@ class Netfilter
   end
 
   private def setup_family(cmd : String, exclusions : Array(String), targets : Array(String)) : Void
-    puts "[netfilter] Setting up #{cmd} rules"
+    Logger.info("netfilter", "Setting up #{cmd} rules")
     run("#{cmd} -t nat -N #{CHAIN_NAME}", ignore_failure: true)
     run("#{cmd} -t nat -F #{CHAIN_NAME}")
 
@@ -46,12 +47,12 @@ class Netfilter
     hook_chain(cmd, "PREROUTING")
 
     exclusions.each do |addr|
-      puts "[netfilter] Exclusion: #{addr} (bypass)"
+      Logger.debug("netfilter", "Exclusion: #{addr} (bypass)")
       run("#{cmd} -t nat -A #{CHAIN_NAME} -d #{addr} -j RETURN")
     end
 
     targets.each do |target|
-      puts "[netfilter] Adding #{cmd} rule for #{target} -> local port #{@listen_port}"
+      Logger.info("netfilter", "Adding #{cmd} rule for #{target} -> local port #{@listen_port}")
       run("#{cmd} -t nat -A #{CHAIN_NAME} -p tcp -d #{target} -j REDIRECT --to-ports #{@listen_port}")
     end
   end
@@ -62,7 +63,7 @@ class Netfilter
   end
 
   private def cleanup_family(cmd : String) : Void
-    puts "[netfilter] Cleaning up #{cmd} chain #{CHAIN_NAME}"
+    Logger.info("netfilter", "Cleaning up #{cmd} chain #{CHAIN_NAME}")
     run("#{cmd} -t nat -D OUTPUT -j #{CHAIN_NAME}", ignore_failure: true)
     run("#{cmd} -t nat -D PREROUTING -j #{CHAIN_NAME}", ignore_failure: true)
     run("#{cmd} -t nat -F #{CHAIN_NAME}", ignore_failure: true)
@@ -72,13 +73,13 @@ class Netfilter
   private def run(command : String, ignore_failure : Bool = false) : Void
     status = system("#{command} 2>&1")
     unless status || ignore_failure
-      puts "[netfilter] Command failed: #{command}"
+      Logger.error("netfilter", "Command failed: #{command}")
     end
   end
 
   private def warn_if_not_root : Void
     if `id -u`.strip != "0"
-      puts "[netfilter] WARNING: not running as root — iptables changes will fail"
+      Logger.warn("netfilter", "Not running as root — iptables changes will fail")
     end
   rescue
   end

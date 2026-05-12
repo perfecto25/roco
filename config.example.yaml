@@ -1,9 +1,16 @@
 port: 12190
 
-relays:
-  serverB:
-    targets: ["serverC", "208.224.251.1", "192.168.30.0/24"]
-    port: 12255
+# Logging
+log: stdout          # or /var/log/roco.log
+log_level: info      # or debug
 
-  serverD:
-    targets: ["serverE"]
+relays:
+  - targets: ["serverC", "208.224.251.1", "192.168.30.0/24"]
+    chain: [hostB]
+
+  # Multi-hop: A -> B -> C -> D -> E -> F
+  # resolve_dns: true passes the hostname "F" through the chain so each hop
+  # resolves it with its own /etc/hosts or DNS.
+  - targets: ["F"]
+    chain: [B, C, D, E]
+    resolve_dns: true

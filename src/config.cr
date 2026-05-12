@@ -1,26 +1,58 @@
 require "yaml"
 require "socket"
 
-struct Relay
-  getter name : String
-  getter address : String
+struct Hop
+  getter host : String
   getter port : UInt16
-  getter targets : Array(String)
 
-  def initialize(@name, @address, @port, @targets)
+  def initialize(@host, @port)
+  end
+
+  # Parse "host:port", "[ipv6]:port", or "host" (with default port).
+  def self.parse(s : String, default_port : UInt16) : Hop
+    s = s.strip
+    if s.starts_with?("[")
+      close = s.index("]:")
+      raise "Invalid hop format: #{s}" unless close
+      Hop.new(s[1...close], s[(close + 2)..].to_u16)
+    elsif idx = s.rindex(':')
+      Hop.new(s[0...idx], s[(idx + 1)..].to_u16)
+    else
+      Hop.new(s, default_port)
+    end
+  end
+
+  def to_handshake : String
+    if host.includes?(":")
+      "[#{host}]:#{port}"
+    else
+      "#{host}:#{port}"
+    end
   end
 
   def resolve_address : String
-    hostname = address.empty? ? name : address
-    return hostname if /\A(\d{1,3}\.){3}\d{1,3}\z/.matches?(hostname)
-    return hostname if hostname.includes?(":")
-    Socket::Addrinfo.resolve(hostname, 0, type: Socket::Type::STREAM).first.ip_address.address
+    return host if /\A(\d{1,3}\.){3}\d{1,3}\z/.matches?(host)
+    return host if host.includes?(":")
+    Socket::Addrinfo.resolve(host, 0, type: Socket::Type::STREAM).first.ip_address.address
   rescue ex
-    raise "Cannot resolve relay hostname '#{address.empty? ? name : address}': #{ex.message}"
+    raise "Cannot resolve hop hostname '#{host}': #{ex.message}"
+  end
+end
+
+struct Relay
+  getter chain : Array(Hop)
+  getter targets : Array(String)
+  getter resolve_dns : Bool
+
+  def initialize(@chain, @targets, @resolve_dns = false)
+  end
+
+  def matching_target(dest_ip : String) : String?
+    targets.find { |t| target_matches?(t, dest_ip) }
   end
 
   def matches_destination?(dest_ip : String) : Bool
-    targets.any? { |t| target_matches?(t, dest_ip) }
+    !matching_target(dest_ip).nil?
   end
 
   private def target_matches?(target : String, dest_ip : String) : Bool
@@ -63,40 +95,62 @@ end
 
 class Config
   getter port : UInt16
-  getter relays : Hash(String, Relay)
+  getter relays : Array(Relay)
+  getter log : String
+  getter log_level : String
 
-  def initialize(@port = 12190_u16, @relays = {} of String => Relay)
+  def initialize(@port = 12190_u16,
+                 @relays = [] of Relay,
+                 @log = "stdout",
+                 @log_level = "info")
   end
 
   def self.from_file(path : String) : Config
     yaml = YAML.parse(File.read(path))
 
     port = yaml["port"]?.try(&.as_i.to_u16) || 12190_u16
+    log = yaml["log"]?.try(&.as_s) || "stdout"
+    log_level = yaml["log_level"]?.try(&.as_s) || "info"
 
-    relays = {} of String => Relay
+    relays = [] of Relay
     if relay_config = yaml["relays"]?
-      relay_config.as_h.each do |name, config|
-        relay_name = name.as_s
-        relay_port = config["port"]?.try(&.as_i.to_u16) || port
-        relay_address = config["address"]?.try(&.as_s) || ""
-
-        targets = config["targets"]?.try(&.as_a.map(&.as_s)) || [] of String
-
-        relays[relay_name] = Relay.new(relay_name, relay_address, relay_port, targets)
+      relay_config.as_a.each do |conf|
+        targets = conf["targets"]?.try(&.as_a.map(&.as_s)) || [] of String
+        chain = parse_chain(conf, port)
+        resolve_dns = conf["resolve_dns"]?.try(&.as_bool) || false
+        relays << Relay.new(chain, targets, resolve_dns)
       end
     end
 
-    new(port, relays)
+    new(port, relays, log, log_level)
   end
 
-  def find_next_hop(dest_ip : String) : Relay?
-    relays.each_value do |relay|
-      return relay if relay.matches_destination?(dest_ip)
+  def find_route(dest_ip : String) : Tuple(Relay, String)?
+    relays.each do |relay|
+      if matched = relay.matching_target(dest_ip)
+        return {relay, matched}
+      end
     end
     nil
   end
 
   def has_relays? : Bool
     !relays.empty?
+  end
+
+  private def self.parse_chain(conf : YAML::Any, default_port : UInt16) : Array(Hop)
+    if chain_yaml = conf["chain"]?
+      chain_yaml.as_a.map do |entry|
+        if str = entry.as_s?
+          Hop.parse(str, default_port)
+        else
+          host = entry["host"].as_s
+          port = entry["port"]?.try(&.as_i.to_u16) || default_port
+          Hop.new(host, port)
+        end
+      end
+    else
+      [] of Hop
+    end
   end
 end

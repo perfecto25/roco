@@ -11,7 +11,7 @@ class Roco
       @config = Config.new(port: 12190_u16)
     end
     Logger.configure(@config.log, @config.log_level)
-    @netfilter = Netfilter.new(@config.port)
+    @netfilter = Netfilter.new(@config.port, @config.firewall)
   end
 
   def run : Void
@@ -75,6 +75,7 @@ def show_help
   puts "Configuration File Example (YAML):"
   puts "---"
   puts "port: 12190"
+  puts "firewall: iptables  # or nftables"
   puts "log: stdout         # or /path/to/logfile"
   puts "log_level: info     # or debug"
   puts ""

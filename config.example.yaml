@@ -1,4 +1,5 @@
 port: 12190
+firewall: iptables  # iptables is default, can also use nftables
 
 # Logging
 log: stdout          # or /var/log/roco.log

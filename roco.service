@@ -1,0 +1,26 @@
+[Unit]
+Description=ROCO (Route Coordinator) - relay proxy daemon
+Documentation=https://github.com/perfecto25/roco
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/roco -c /etc/roco/config.yaml
+Restart=on-failure
+RestartSec=5
+
+# roco edits the kernel nat table (iptables/nftables), so it needs network admin
+# privileges. Running as root is the simplest; the capabilities below are enough
+# if you prefer to drop privileges via a dedicated user.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

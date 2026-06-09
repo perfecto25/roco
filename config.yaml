@@ -1,11 +1,11 @@
 port: 12190
-firewall: nftables  # iptables is default, can also use nftables
+firewall: iptables  # iptables is default, can also use nftables
 
 # Logging
 log: stdout          # or /var/log/roco.log
 log_level: info      # or debug
 
 relays:
-  - targets: ["192.168.29.0/24"]
-    chain: ['mrxmac3']
+  - targets: ["qbtch2"]
+    chain: ['qbtch7']
 

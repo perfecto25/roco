@@ -3,6 +3,8 @@ require "./netfilter"
 require "./proxy"
 require "./logger"
 
+VERSION = {{ `shards version "#{__DIR__}"`.chomp.stringify.downcase }}
+
 class Roco
   def initialize(config_path : String?)
     if config_path
@@ -57,7 +59,8 @@ end
 
 # Main entry point
 def show_help
-  puts "Roco - Network Proxy Daemon for Relay Chains"
+  #ERSION    = SHARD_YML.lines.find { |l| l.starts_with?("version:") }.not_nil!.split(": ", 2).last.strip
+  puts "Roco (#{VERSION}) - Network Proxy Daemon for Relay Chains"
   puts ""
   puts "Roco enables an unreachable host to be accessed through a chain of reachable relays."
   puts "It operates at the network packet level using netfilter on Linux."

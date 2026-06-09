@@ -12,11 +12,28 @@ class Netfilter
   end
 
   def add_target(target : String) : Void
+    # IP literals and CIDR ranges are bucketed as-is; bare hostnames are
+    # resolved to their address(es) so they land in the right family.
     if ipv6?(target)
       @ipv6_targets << target
     elsif ipv4?(target)
       @ipv4_targets << target
+    else
+      resolve_target(target)
     end
+  end
+
+  private def resolve_target(target : String) : Void
+    addrs = Socket::Addrinfo.resolve(target, 0, type: Socket::Type::STREAM)
+    addrs.map(&.ip_address.address).uniq.each do |addr|
+      if ipv6?(addr)
+        @ipv6_targets << addr
+      elsif ipv4?(addr)
+        @ipv4_targets << addr
+      end
+    end
+  rescue ex
+    Logger.error("netfilter", "Cannot resolve target '#{target}': #{ex.message}")
   end
 
   def add_exclusion(addr : String) : Void

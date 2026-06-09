@@ -25,12 +25,13 @@ class TCPProxy
 
       addr = next_hop.resolve_address
       if remaining.empty?
-        Logger.debug("proxy", "Direct to #{next_hop.host}:#{next_hop.port}")
+        Logger.info("proxy", "Forwarding to #{next_hop.host}:#{next_hop.port} (final hop)")
       else
-        Logger.debug("proxy", "Hop to #{next_hop.host}:#{next_hop.port}, then #{remaining.map(&.to_handshake).join(" -> ")}")
+        Logger.info("proxy", "Forwarding to #{next_hop.host}:#{next_hop.port}, then #{remaining.map(&.to_handshake).join(" -> ")}")
       end
 
       server = TCPSocket.new(addr, next_hop.port)
+      Logger.info("proxy", "Connected to #{next_hop.host}:#{next_hop.port} (#{addr})")
       write_handshake(server, remaining) unless remaining.empty?
 
       proxy_bidirectional(client, server)
@@ -46,11 +47,18 @@ class TCPProxy
     # Locally REDIRECTed: kernel knows the original destination.
     ip, port = SocketUtils.get_original_destination(client)
     if ip && port
+      Logger.info("proxy", "Locally redirected, original destination #{ip}:#{port}")
       return build_chain_from_config(ip, port)
     end
 
     # Peer roco connection: read handshake.
-    read_handshake(client)
+    hops = read_handshake(client)
+    if hops
+      Logger.info("proxy", "Peer handshake, route #{hops.map(&.to_handshake).join(" -> ")}")
+    else
+      Logger.warn("proxy", "No original destination and no valid handshake")
+    end
+    hops
   end
 
   private def build_chain_from_config(dest_ip : String, dest_port : UInt16) : Array(Hop)
@@ -145,6 +153,8 @@ class RelayServer
     loop do
       begin
         client = @server.accept
+        peer = (client.remote_address.to_s rescue "unknown")
+        Logger.info("relay", "Connection from #{peer}")
         spawn do
           TCPProxy.new(@config).handle_client(client)
         end

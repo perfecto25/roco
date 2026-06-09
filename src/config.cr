@@ -98,11 +98,13 @@ class Config
   getter relays : Array(Relay)
   getter log : String
   getter log_level : String
+  getter firewall : String
 
   def initialize(@port = 12190_u16,
                  @relays = [] of Relay,
                  @log = "stdout",
-                 @log_level = "info")
+                 @log_level = "info",
+                 @firewall = "iptables")
   end
 
   def self.from_file(path : String) : Config
@@ -111,6 +113,7 @@ class Config
     port = yaml["port"]?.try(&.as_i.to_u16) || 12190_u16
     log = yaml["log"]?.try(&.as_s) || "stdout"
     log_level = yaml["log_level"]?.try(&.as_s) || "info"
+    firewall = yaml["firewall"]?.try(&.as_s) || "iptables"
 
     relays = [] of Relay
     if relay_config = yaml["relays"]?
@@ -122,7 +125,7 @@ class Config
       end
     end
 
-    new(port, relays, log, log_level)
+    new(port, relays, log, log_level, firewall)
   end
 
   def find_route(dest_ip : String) : Tuple(Relay, String)?

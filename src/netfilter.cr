@@ -4,7 +4,7 @@ require "./logger"
 class Netfilter
   CHAIN_NAME = "ROCO"
 
-  def initialize(@listen_port : UInt16)
+  def initialize(@listen_port : UInt16, @firewall : String = "iptables")
     @ipv4_targets = [] of String
     @ipv6_targets = [] of String
     @ipv4_exclusions = [] of String
@@ -29,14 +29,26 @@ class Netfilter
 
   def setup : Void
     warn_if_not_root
-    setup_family("iptables", @ipv4_exclusions, @ipv4_targets) unless @ipv4_targets.empty?
-    setup_family("ip6tables", @ipv6_exclusions, @ipv6_targets) unless @ipv6_targets.empty?
+    if @firewall == "nftables"
+      setup_family_nft("ip", "ip", @ipv4_exclusions, @ipv4_targets) unless @ipv4_targets.empty?
+      setup_family_nft("ip6", "ip6", @ipv6_exclusions, @ipv6_targets) unless @ipv6_targets.empty?
+    else
+      setup_family("iptables", @ipv4_exclusions, @ipv4_targets) unless @ipv4_targets.empty?
+      setup_family("ip6tables", @ipv6_exclusions, @ipv6_targets) unless @ipv6_targets.empty?
+    end
   end
 
   def cleanup : Void
-    cleanup_family("iptables")
-    cleanup_family("ip6tables")
+    if @firewall == "nftables"
+      cleanup_family_nft("ip")
+      cleanup_family_nft("ip6")
+    else
+      cleanup_family("iptables")
+      cleanup_family("ip6tables")
+    end
   end
+
+  # ── iptables ──────────────────────────────────────────────────────────────
 
   private def setup_family(cmd : String, exclusions : Array(String), targets : Array(String)) : Void
     Logger.info("netfilter", "Setting up #{cmd} rules")
@@ -70,6 +82,40 @@ class Netfilter
     run("#{cmd} -t nat -X #{CHAIN_NAME}", ignore_failure: true)
   end
 
+  # ── nftables ──────────────────────────────────────────────────────────────
+
+  private def setup_family_nft(family : String, addr_keyword : String, exclusions : Array(String), targets : Array(String)) : Void
+    Logger.info("netfilter", "Setting up nftables rules (#{family})")
+
+    # "tcp" alone is not a valid nftables expression; must reference a header field.
+    proto_match = family == "ip6" ? "ip6 nexthdr tcp" : "ip protocol tcp"
+
+    # Start fresh: delete the table if it exists, then recreate it.
+    run("nft delete table #{family} #{CHAIN_NAME}", ignore_failure: true)
+    run("nft add table #{family} #{CHAIN_NAME}")
+    run("nft add chain #{family} #{CHAIN_NAME} PREROUTING '{ type nat hook prerouting priority dstnat; policy accept; }'")
+    run("nft add chain #{family} #{CHAIN_NAME} OUTPUT '{ type nat hook output priority -100; policy accept; }'")
+
+    exclusions.each do |addr|
+      Logger.debug("netfilter", "Exclusion: #{addr} (bypass)")
+      run("nft add rule #{family} #{CHAIN_NAME} PREROUTING #{addr_keyword} daddr #{addr} return")
+      run("nft add rule #{family} #{CHAIN_NAME} OUTPUT #{addr_keyword} daddr #{addr} return")
+    end
+
+    targets.each do |target|
+      Logger.info("netfilter", "Adding nftables rule for #{target} -> local port #{@listen_port}")
+      run("nft add rule #{family} #{CHAIN_NAME} PREROUTING #{addr_keyword} daddr #{target} #{proto_match} redirect to :#{@listen_port}")
+      run("nft add rule #{family} #{CHAIN_NAME} OUTPUT #{addr_keyword} daddr #{target} #{proto_match} redirect to :#{@listen_port}")
+    end
+  end
+
+  private def cleanup_family_nft(family : String) : Void
+    Logger.info("netfilter", "Cleaning up nftables table #{family} #{CHAIN_NAME}")
+    run("nft delete table #{family} #{CHAIN_NAME}", ignore_failure: true)
+  end
+
+  # ── shared ────────────────────────────────────────────────────────────────
+
   private def run(command : String, ignore_failure : Bool = false) : Void
     status = system("#{command} 2>&1")
     unless status || ignore_failure
@@ -79,7 +125,8 @@ class Netfilter
 
   private def warn_if_not_root : Void
     if `id -u`.strip != "0"
-      Logger.warn("netfilter", "Not running as root — iptables changes will fail")
+      tool = @firewall == "nftables" ? "nftables" : "iptables"
+      Logger.warn("netfilter", "Not running as root — #{tool} changes will fail")
     end
   rescue
   end

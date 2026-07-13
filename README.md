@@ -8,3 +8,11 @@ Roco is designed for simplicity and sole task of proxying TCP and UDP packets to
 
 ## Quickstart
 
+
+## Building
+
+single binary for all linux versions (musl-linked binary)
+
+
+    docker run --rm -v $PWD:/w -w /w crystallang/crystal:1.18.0-alpine \
+    crystal build src/roco.cr -o bin/roco --release --static

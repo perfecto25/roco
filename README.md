@@ -8,6 +8,10 @@ Roco is designed for simplicity and sole task of proxying TCP and UDP packets to
 
 ## Quickstart
 
+Download the roco binary
+
+use the example configs as an example to setup a relay chain
+
 
 ## Building
 

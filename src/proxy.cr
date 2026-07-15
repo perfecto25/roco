@@ -8,31 +8,66 @@ class TCPProxy
   HANDSHAKE_MAX    = 4096
   BUFFER_SIZE      = 4096
 
+  # End-to-end connection status, sent back up the chain once the far end has
+  # been reached (or failed). Lets the originator tear down the client instead
+  # of leaving it half-open when a downstream hop cannot reach the target.
+  STATUS_OK  = "ROCO-OK"
+  STATUS_ERR = "ROCO-ERR"
+
   def initialize(@config : Config)
   end
 
   def handle_client(client : TCPSocket) : Void
     server = nil.as(TCPSocket?)
     begin
-      chain = determine_chain(client)
-      unless chain && !chain.empty?
+      resolved = determine_chain(client)
+      unless resolved
         Logger.warn("proxy", "Could not determine destination — dropping connection")
+        return
+      end
+      chain, client_is_peer = resolved
+      if chain.empty?
+        Logger.warn("proxy", "Empty route — dropping connection")
         return
       end
 
       next_hop = chain.first
       remaining = chain[1..]
 
-      addr = next_hop.resolve_address
-      if remaining.empty?
-        Logger.info("proxy", "Forwarding to #{next_hop.host}:#{next_hop.port} (final hop)")
-      else
-        Logger.info("proxy", "Forwarding to #{next_hop.host}:#{next_hop.port}, then #{remaining.map(&.to_handshake).join(" -> ")}")
+      # Connect to the next hop. On failure, report it back upstream (if the
+      # client is a roco peer) so the originator can surface it, then bail.
+      begin
+        addr = next_hop.resolve_address
+        if remaining.empty?
+          Logger.info("proxy", "Forwarding to #{next_hop.host}:#{next_hop.port} (final hop)")
+        else
+          Logger.info("proxy", "Forwarding to #{next_hop.host}:#{next_hop.port}, then #{remaining.map(&.to_handshake).join(" -> ")}")
+        end
+        server = TCPSocket.new(addr, next_hop.port)
+        Logger.info("proxy", "Connected to #{next_hop.host}:#{next_hop.port} (#{addr})")
+      rescue e
+        Logger.error("proxy", "Error connecting to '#{next_hop.host}:#{next_hop.port}': #{e.message}")
+        send_status(client, false, e.message) if client_is_peer
+        return
       end
 
-      server = TCPSocket.new(addr, next_hop.port)
-      Logger.info("proxy", "Connected to #{next_hop.host}:#{next_hop.port} (#{addr})")
-      write_handshake(server, remaining) unless remaining.empty?
+      # Determine the end-to-end status. A terminal hop just connected to the
+      # real target, so success is implied; an intermediate hop must wait for
+      # the status propagated back from deeper in the chain.
+      if remaining.empty?
+        status_ok, status_msg = true, nil.as(String?)
+      else
+        write_handshake(server, remaining)
+        status_ok, status_msg = read_status(server)
+      end
+
+      # Relay the verdict upstream when our client is another roco node.
+      send_status(client, status_ok, status_msg) if client_is_peer
+
+      unless status_ok
+        Logger.warn("proxy", "Route down: #{status_msg} — closing connection")
+        return
+      end
 
       proxy_bidirectional(client, server)
     rescue e
@@ -43,22 +78,57 @@ class TCPProxy
     end
   end
 
-  private def determine_chain(client : TCPSocket) : Array(Hop)?
+  # Returns the resolved chain plus whether the client is a roco peer (arrived
+  # via handshake) rather than a locally-redirected application.
+  private def determine_chain(client : TCPSocket) : Tuple(Array(Hop), Bool)?
     # Locally REDIRECTed: kernel knows the original destination.
     ip, port = SocketUtils.get_original_destination(client)
     if ip && port
       Logger.info("proxy", "Locally redirected, original destination #{ip}:#{port}")
-      return build_chain_from_config(ip, port)
+      return {build_chain_from_config(ip, port), false}
     end
 
     # Peer roco connection: read handshake.
     hops = read_handshake(client)
     if hops
       Logger.info("proxy", "Peer handshake, route #{hops.map(&.to_handshake).join(" -> ")}")
-    else
-      Logger.warn("proxy", "No original destination and no valid handshake")
+      return {hops, true}
     end
-    hops
+
+    Logger.warn("proxy", "No original destination and no valid handshake")
+    nil
+  end
+
+  private def send_status(sock : TCPSocket, ok : Bool, msg : String?) : Void
+    line = ok ? "#{STATUS_OK}\n" : "#{STATUS_ERR} #{msg}\n"
+    sock.print line
+    sock.flush
+  rescue
+  end
+
+  private def read_status(sock : TCPSocket) : Tuple(Bool, String?)
+    sock.read_timeout = 10.seconds
+    begin
+      line = String.build do |io|
+        HANDSHAKE_MAX.times do
+          b = sock.read_byte
+          break if b.nil? || b == '\n'.ord
+          io.write_byte(b.to_u8)
+        end
+      end
+
+      if line.starts_with?(STATUS_OK)
+        {true, nil}
+      elsif line.starts_with?(STATUS_ERR)
+        {false, line[STATUS_ERR.size..].strip}
+      else
+        {false, "invalid status from downstream"}
+      end
+    ensure
+      sock.read_timeout = nil
+    end
+  rescue
+    {false, "no status from downstream (timeout)"}
   end
 
   private def build_chain_from_config(dest_ip : String, dest_port : UInt16) : Array(Hop)
@@ -127,7 +197,12 @@ class TCPProxy
       channel.send(nil)
     end
 
-    2.times { channel.receive }
+    # As soon as one direction ends, close both sockets so the other fiber
+    # unblocks instead of leaving the connection half-open.
+    channel.receive
+    client.close rescue nil
+    server.close rescue nil
+    channel.receive
   end
 
   private def copy_stream(from : TCPSocket, to : TCPSocket) : Void

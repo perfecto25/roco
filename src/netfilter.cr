@@ -1,5 +1,6 @@
 require "socket"
 require "./logger"
+require "./socket_utils"
 
 class Netfilter
   CHAIN_NAME = "ROCO"
@@ -75,6 +76,11 @@ class Netfilter
     hook_chain(cmd, "OUTPUT")
     hook_chain(cmd, "PREROUTING")
 
+    # roco's own outbound connections (to the next hop or the final target)
+    # must leave as-is, or relayed traffic to one of our targets would loop
+    # back into the listener.
+    run("#{cmd} -t nat -A #{CHAIN_NAME} -m mark --mark #{fwmark} -j RETURN")
+
     exclusions.each do |addr|
       Logger.debug("netfilter", "Exclusion: #{addr} (bypass)")
       run("#{cmd} -t nat -A #{CHAIN_NAME} -d #{addr} -j RETURN")
@@ -113,6 +119,9 @@ class Netfilter
     run("nft add chain #{family} #{CHAIN_NAME} PREROUTING '{ type nat hook prerouting priority dstnat; policy accept; }'")
     run("nft add chain #{family} #{CHAIN_NAME} OUTPUT '{ type nat hook output priority -100; policy accept; }'")
 
+    # See setup_family: skip roco's own (marked) outbound connections.
+    run("nft add rule #{family} #{CHAIN_NAME} OUTPUT meta mark #{fwmark} return")
+
     exclusions.each do |addr|
       Logger.debug("netfilter", "Exclusion: #{addr} (bypass)")
       run("nft add rule #{family} #{CHAIN_NAME} PREROUTING #{addr_keyword} daddr #{addr} return")
@@ -132,6 +141,10 @@ class Netfilter
   end
 
   # ── shared ────────────────────────────────────────────────────────────────
+
+  private def fwmark : String
+    "0x#{SocketUtils::FWMARK.to_s(16)}"
+  end
 
   private def run(command : String, ignore_failure : Bool = false) : Void
     status = system("#{command} 2>&1")

@@ -1,0 +1,103 @@
+# Build static (musl) roco binaries for Linux x86_64 and arm64 and attach them
+# to a GitHub release.
+#
+# Triggered by pushing a version tag that matches shard.yml, e.g.:
+#   git tag v0.1.2 && git push origin v0.1.2
+# or manually from the Actions tab (Run workflow -> enter an existing tag).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release (e.g. v0.1.2)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  # Multi-arch image (amd64 + arm64); 1.18 and older only ship amd64.
+  CRYSTAL_IMAGE: crystallang/crystal:1.21.0-alpine
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: Build linux-${{ matrix.arch }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Check tag matches shard.yml version
+        run: |
+          version=$(sed -n 's/^version:[[:space:]]*//p' shard.yml)
+          if [ "v${version}" != "${TAG}" ]; then
+            echo "::error::Tag ${TAG} does not match shard.yml version ${version}"
+            exit 1
+          fi
+
+      - name: Build static binary
+        run: |
+          mkdir -p dist
+          docker run --rm -v "$PWD:/w" -w /w "$CRYSTAL_IMAGE" sh -euc '
+            crystal build src/roco.cr -o dist/roco --release --static --no-debug
+            strip dist/roco
+          '
+          sudo chown -R "$(id -u):$(id -g)" dist
+
+      - name: Smoke test
+        run: |
+          file dist/roco
+          file dist/roco | grep -q "statically linked"
+          ./dist/roco --help | sed -n 1p
+          cd "$(mktemp -d)"
+          "$GITHUB_WORKSPACE/dist/roco" tls init-ca
+          "$GITHUB_WORKSPACE/dist/roco" tls issue smoke --ip 127.0.0.1
+          openssl verify -CAfile ca.crt nodes/smoke/node.crt
+
+      - name: Package
+        run: |
+          name="roco-${TAG}-linux-${{ matrix.arch }}"
+          mv dist/roco "dist/${name}"
+          (cd dist && sha256sum "${name}" > "${name}.sha256")
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: roco-linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -la dist
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "roco $TAG" --generate-notes --verify-tag
+          fi

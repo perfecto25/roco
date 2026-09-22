@@ -12,25 +12,24 @@ Roco routes packets via intermediate hops (servers). A Roco relay process listen
 
 For every server in the packet's path, there needs to be a Roco process running, since the process is the one managing firewall in-memory rules for routing.
 
-Lets say you have 3 servers, nodeA, nodeB, nodeC
+Lets say you have 3 servers, "alpha", nodeB, nodeC
 
 A cannot reach C directly, but A can reach B, and B can reach C
 
-the config on nodeA will look like this
+the config on "alpha" will look like this
 
     relays:
       - targets: ['nodeC']
         chain: ['nodeB']
 
-this translates to, "on nodeA, any packet bound for nodeC, send it to nodeB"
+this translates to, "on A, any packet bound for C, send it to B"
 
 on nodeB, a Roco process is running without any config, ie a pure relay
 
-it recieves a packet from nodeA, sees the destination as 'nodeC' and forwards it to nodeC
+it recieves a packet from "alpha", sees the destination as 'nodeC' and forwards it to nodeC
 
 This works the same way for multi-hop chain, ie A > B > C > D > E > etc
 
-Roco can route TCP packets only
 
 ### Encryption
 
@@ -59,21 +58,22 @@ not it has `relays:`. Each connection is one of two kinds:
 - **A connection from another roco node.** It starts with a roco handshake that
   carries the full route. roco follows that route and ignores its own `relays:`.
 
-For example, this node sends its own traffic for qbtch2 via qbtch7, and can still
+For example, this node sends its own traffic for node C via node B, and can still
 appear in other nodes' `chain:`:
 
     relays:
-      - targets: ["qbtch2"]
-        chain: ['qbtch7']
+      - targets: ["nodeC"]
+        chain: ['nodeB']
 
 ### How roco keeps its own connections out of its redirect rules
-
 The firewall rules redirect all TCP to a target's IP into the listener. Without
 an exception, that would include connections roco itself makes. Suppose another
-node asks this one to relay to qbtch2 (for example, `chain: [thisnode]` with
-target qbtch2). roco's own connection to qbtch2 would then be caught and sent
-back into its own listener, and from there via qbtch7 instead of directly. That
-breaks when qbtch2 is itself a roco hop in the route, and can loop.
+node asks this one to relay to node C (for example, `chain: [thisnode]` with
+target 'nodeC'). 
+
+Roco's own connection to C would then be caught and sent
+back into its own listener, and from there via node B instead of directly. That
+breaks when "node C" is itself a roco hop in the route, and can loop.
 
 To prevent this, roco sets a firewall mark (`SO_MARK`, value `0x524f`) on every
 outbound connection it makes: to the next hop and to the final target. The
@@ -108,9 +108,9 @@ roco-to-roco link runs mutual TLS (TLS 1.3): each side proves its identity with 
 certificate signed by your own private CA, and connections from anything
 without such a certificate are refused.
 
-What gets encrypted, for a chain `qbtch7 -> atlas -> mrxmac3 -> 192.168.30.135`:
+What gets encrypted, for a chain `A -> B -> C -> D`:
 
-    app on qbtch7 --plain--> roco(qbtch7) ==TLS==> roco(atlas) ==TLS==> roco(mrxmac3) --plain--> 192.168.30.135:22
+    app on "A" --plain--> roco("A") ==TLS==> roco("B") ==TLS==> roco("C") --plain--> "D":22
       (loopback)                                                                              (target doesn't speak roco)
 
 Each hop decrypts and re-encrypts, so intermediate roco nodes can see the
@@ -130,7 +130,7 @@ All certificate work is built into the roco binary (`roco tls ...`). No
 | `node.crt` | each node, `/etc/roco/tls/` | no | The node's certificate, presented to peers |
 
 Every roco node needs its own `node.key` and `node.crt`, including the
-originating node (qbtch7 above). The target host needs nothing.
+originating node ("node A" above). The target host needs nothing.
 
 The "admin machine" can be any machine you control (your laptop, a bastion).
 It only runs `roco tls` commands, not the roco daemon.
@@ -147,8 +147,8 @@ it's needed whenever you add or renew a node.
 ### Step 2: create a certificate for each node
 
 A node's certificate must contain every name other nodes use for it in their
-`chain:` config. If qbtch7's config says `chain: ["atlas", "mrxmac3"]`, then
-atlas's certificate needs `atlas` and mrxmac3's needs `mrxmac3`. The node name
+`chain:` config. If "alpha"'s config says `chain: ["nodeB", "nodeC"]`, then
+nodeB's certificate needs `nodeB` and nodeC's needs `nodeC`. The node name
 you pass is always included. Add any other hostname or IP it's reached by with
 `--dns` / `--ip`; both can be repeated or given as comma-separated lists.
 
@@ -157,32 +157,32 @@ Pick either option below for each node.
 **Option A: generate everything on the admin machine (simplest)**
 
     cd ~/roco-ca
-    roco tls issue qbtch7
-    roco tls issue atlas   --ip 192.168.40.21
-    roco tls issue mrxmac3 --ip 192.168.30.109
+    roco tls issue "alpha"
+    roco tls issue "bravo" --ip 192.168.40.21
+    roco tls issue nodeC --ip 192.168.30.109
 
 Each command writes a ready-to-copy bundle to `nodes/<name>/` (`node.key`,
 `node.crt`, `ca.crt`). Copy it to the node:
 
-    ssh atlas mkdir -p /etc/roco/tls
-    scp nodes/atlas/* atlas:/etc/roco/tls/
-    ssh atlas chmod 600 /etc/roco/tls/node.key
+    ssh bravo mkdir -p /etc/roco/tls
+    scp nodes/bravo/* nodeB:/etc/roco/tls/
+    ssh bravo chmod 600 /etc/roco/tls/node.key
 
 **Option B: private key never leaves the node**
 
 On the node:
 
-    roco tls request atlas          # writes /etc/roco/tls/node.key and /etc/roco/tls/atlas.csr
+    roco tls request bravo        # writes /etc/roco/tls/node.key and /etc/roco/tls/bravo.csr
 
-Copy `atlas.csr` to the admin machine, then sign it:
+Copy `bravo.csr` to the admin machine, then sign it:
 
     cd ~/roco-ca
-    roco tls sign atlas.csr --ip 192.168.40.21
+    roco tls sign bravo.csr --ip 192.168.40.21
 
-This writes `nodes/atlas/node.crt` and `nodes/atlas/ca.crt`. Copy both back
+This writes `nodes/bravo/node.crt` and `nodes/bravo/ca.crt`. Copy both back
 next to the node's key:
 
-    scp nodes/atlas/node.crt nodes/atlas/ca.crt atlas:/etc/roco/tls/
+    scp nodes/bravo/node.crt nodes/bravo/ca.crt bravo:/etc/roco/tls/
 
 Node certificates are valid for 825 days (`--days N` to change). To check what
 a certificate contains (names, expiry), run `roco tls show /etc/roco/tls/node.crt`.
@@ -196,7 +196,7 @@ a certificate contains (names, expiry), run `roco tls show /etc/roco/tls/node.cr
       cert: /etc/roco/tls/node.crt
       key:  /etc/roco/tls/node.key
       # Optional: only accept connections from these nodes (certificate names).
-      # allowed_peers: [qbtch7, atlas]
+      # allowed_peers: [alpha, bravo]
 
 | mode | Connects to next roco hop | Accepts from roco peers |
 |---|---|---|
@@ -210,12 +210,12 @@ a certificate contains (names, expiry), run `roco tls show /etc/roco/tls/node.cr
 
 On startup:
 
-    roco: TLS required, node certificate atlas (/etc/roco/tls/node.crt), accepting any node signed by the CA
+    roco: TLS required, node certificate bravo (/etc/roco/tls/node.crt), accepting any node signed by the CA
 
 Per connection, on the sending and receiving node:
 
-    proxy: Connected to atlas:12190 (192.168.40.21, TLS)
-    proxy: Peer handshake (TLS peer qbtch7), route mrxmac3:12190 -> 192.168.30.135:22
+    proxy: Connected to bravo:12190 (192.168.40.21, TLS)
+    proxy: Peer handshake (TLS peer alpha), route charlie:12190 -> 192.168.30.135:22
 
 If a TLS file is missing or the key doesn't match the certificate, roco exits at
 startup with `TLS setup failed: ...`.
@@ -228,9 +228,12 @@ passes:
 
 1. Install the certificates on all nodes (steps 1 and 2).
 2. Set `mode: optional` and restart, starting at the **end** of each chain and
-   working back. For `qbtch7 -> atlas -> mrxmac3`, that's mrxmac3, then
-   atlas, then qbtch7. Connections keep working throughout, because each node
+   working back. For `alpha -> bravo -> charlie`, that's charlie, then
+   bravo, then alpha. 
+   
+   Connections keep working throughout, because each node
    still accepts plaintext.
+   
 3. Once every node is on `optional`, set `mode: required` everywhere, in any
    order.
 

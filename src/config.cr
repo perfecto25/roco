@@ -1,5 +1,6 @@
 require "yaml"
 require "socket"
+require "./tls"
 
 struct Hop
   getter host : String
@@ -93,18 +94,60 @@ struct Relay
   end
 end
 
+struct TlsSettings
+  DEFAULT_DIR = "/etc/roco/tls"
+
+  getter mode : Tls::Mode
+  getter ca : String
+  getter cert : String
+  getter key : String
+  getter allowed_peers : Array(String)
+
+  def initialize(@mode = Tls::Mode::Off,
+                 @ca = "#{DEFAULT_DIR}/ca.crt",
+                 @cert = "#{DEFAULT_DIR}/node.crt",
+                 @key = "#{DEFAULT_DIR}/node.key",
+                 @allowed_peers = [] of String)
+  end
+
+  def self.from_yaml(yaml : YAML::Any?) : TlsSettings
+    return new unless yaml
+    defaults = new
+    new(
+      parse_mode(yaml["mode"]?),
+      yaml["ca"]?.try(&.as_s) || defaults.ca,
+      yaml["cert"]?.try(&.as_s) || defaults.cert,
+      yaml["key"]?.try(&.as_s) || defaults.key,
+      yaml["allowed_peers"]?.try(&.as_a.map(&.as_s)) || [] of String,
+    )
+  end
+
+  # YAML reads a bare `off`/`on` as a boolean, so accept both forms.
+  private def self.parse_mode(value : YAML::Any?) : Tls::Mode
+    return Tls::Mode::Off unless value
+    raw = value.raw
+    case raw
+    when Bool   then raw ? Tls::Mode::Required : Tls::Mode::Off
+    when String then Tls::Mode.parse?(raw) || raise "Invalid tls.mode '#{raw}' (use off, optional or required)"
+    else             raise "Invalid tls.mode '#{raw}' (use off, optional or required)"
+    end
+  end
+end
+
 class Config
   getter port : UInt16
   getter relays : Array(Relay)
   getter log : String
   getter log_level : String
   getter firewall : String
+  getter tls : TlsSettings
 
   def initialize(@port = 12190_u16,
                  @relays = [] of Relay,
                  @log = "stdout",
                  @log_level = "info",
-                 @firewall = "iptables")
+                 @firewall = "iptables",
+                 @tls = TlsSettings.new)
   end
 
   def self.from_file(path : String) : Config
@@ -125,7 +168,9 @@ class Config
       end
     end
 
-    new(port, relays, log, log_level, firewall)
+    tls = TlsSettings.from_yaml(yaml["tls"]?)
+
+    new(port, relays, log, log_level, firewall, tls)
   end
 
   def find_route(dest_ip : String) : Tuple(Relay, String)?

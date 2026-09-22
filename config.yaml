@@ -6,6 +6,6 @@ log: stdout          # or /var/log/roco.log
 log_level: info      # or debug
 
 relays:
-  - targets: ["qbtch2"]
-    chain: ['qbtch7']
+  - targets: ["nycweb1"]
+    chain: ["proxy01"]
 
